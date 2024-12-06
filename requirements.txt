@@ -61,4 +61,9 @@ tzdata==2024.1
 uritemplate==4.1.1
 urllib3==2.2.2
 watchdog==4.0.2
-PyPDF2
+PyPDF2==2.7.0
+faiss-cpu==1.7.2
+sentence-transformers==2.2.2
+transformers==4.31.0
+Pillow==10.4.0
+speechrecognition==3.9.0
