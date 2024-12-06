@@ -1,3 +1,4 @@
+
 import os
 import PyPDF2
 import faiss
@@ -10,11 +11,24 @@ from PIL import Image
 import speech_recognition as sr
 
 # Configure Generative AI model
-genai.configure(api_key="AIzaSyB9uvWwEgQSnBwogp93Ab6cwJN8FxFAqHw")  # Replace with a valid key
+genai.configure(api_key="AIzaSyB9uvWwEgQSnBwogp93Ab6cwJN8FxFAqHw")
 model_gemini = genai.GenerativeModel("gemini-1.5-flash")
 
 # Load emotion detection model
 emotion_detector = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base")
+
+# Topic detection function
+def detect_topic(query):
+    """Basic keyword-based topic detection."""
+    topics = {
+        "AWS CodeBuild": ["CodeBuild", "CI/CD", "build", "pipeline"],
+        "Security": ["IAM", "VPC", "encryption", "shared responsibility"],
+        "Teams": ["team", "collaboration", "roles"],
+    }
+    for topic, keywords in topics.items():
+        if any(keyword.lower() in query.lower() for keyword in keywords):
+            return topic
+    return "General"
 
 # PDF Text Extraction Functions
 def extract_text_from_pdf(pdf_path):
@@ -43,11 +57,10 @@ def build_faiss_index(texts, model):
     index.add(np.array(embeddings))
     return index, chunks
 
-def retrieve_context(query, index, chunks, model):
-    query_embedding = model.encode([query])
-    distances, indices = index.search(np.array(query_embedding), k=5)
-    relevant_chunks = [chunks[i] for i in indices[0]]
-    return " ".join(relevant_chunks)
+def input_image_setup(uploaded_file):
+    if uploaded_file is not None:
+        return [{"mime_type": uploaded_file.type, "data": uploaded_file.getvalue()}]
+    return None
 
 def detect_emotion(user_input, history):
     emotion_results = emotion_detector(user_input)
@@ -62,6 +75,11 @@ def detect_emotion(user_input, history):
         return primary_emotion, confidence, context_primary
     return primary_emotion, confidence, None
 
+def retrieve_context(query, index, chunks, model):
+    query_embedding = model.encode([query])
+    distances, indices = index.search(np.array(query_embedding), k=5)
+    return " ".join(chunks[i] for i in indices[0])
+
 def personalize_response(response, emotion, confidence):
     if confidence > 0.8:
         emoji_map = {"joy": "😊", "anger": "😡", "sadness": "😢"}
@@ -75,7 +93,7 @@ def get_gemini_response(query, context, image_data, history):
     )
 
     prompt = (
-        f"You are an expert AI assistant.\n"
+        f"You are an expert AI assistant focusing on {st.session_state.current_topic}.\n"
         f"Below is the conversation history:\n{history_context}\n\n"
         f"Here is the current context: {context}\n"
         f"User question: {query}\n"
@@ -86,18 +104,25 @@ def get_gemini_response(query, context, image_data, history):
     response = model_gemini.generate_content(input_data)
     return response.text
 
-def input_image_setup(uploaded_file):
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file)
-        st.image(image, caption="Uploaded Image", use_column_width=True)
-        return [{"mime_type": uploaded_file.type, "data": uploaded_file.getvalue()}]
+def record_voice():
+    recognizer = sr.Recognizer()
+    with sr.Microphone() as source:
+        st.info("Listening... Please speak.")
+        try:
+            audio = recognizer.listen(source, timeout=5)
+            return recognizer.recognize_google(audio)
+        except sr.WaitTimeoutError:
+            st.warning("No speech detected.")
+        except sr.UnknownValueError:
+            st.warning("Could not understand the audio.")
+        except sr.RequestError as e:
+            st.error(f"Request error: {e}")
     return None
 
 # Streamlit App Configuration
 st.set_page_config(page_title="Gemini Interactive Assistant")
 st.header("AI Assistant with PDF, Voice, and Image Knowledge")
 
-# Load PDFs
 folder_path = "pdfs"
 if not os.path.exists(folder_path):
     st.sidebar.error("The 'pdfs' folder does not exist.")
@@ -113,47 +138,35 @@ index, chunks = build_faiss_index(pdf_texts, model_pdf)
 
 if "history" not in st.session_state:
     st.session_state.history = []
+if "current_topic" not in st.session_state:
+    st.session_state.current_topic = "General"
 
-# User Input
 voice_input = st.button("Record Voice")
 if voice_input:
-    recognizer = sr.Recognizer()
-    with sr.Microphone() as source:
-        st.info("Listening... Please speak.")
-        try:
-            audio = recognizer.listen(source, timeout=5)
-            transcription = recognizer.recognize_google(audio)
-            st.session_state.input_query = transcription
-        except Exception as e:
-            st.error(f"Voice input error: {e}")
+    transcription = record_voice()
+    if transcription:
+        st.session_state.input_query = transcription
 
 input_query = st.text_input("Or type your question:", st.session_state.get("input_query", ""))
 uploaded_file = st.file_uploader("Upload an image (optional)", type=["jpg", "jpeg", "png"])
 
 if st.button("Submit") and input_query:
-    # Retrieve context from PDFs
+    detected_topic = detect_topic(input_query)
+    st.session_state.current_topic = detected_topic
+    
+    user_emotion, confidence, context_emotion = detect_emotion(input_query, st.session_state.history)
     context = retrieve_context(input_query, index, chunks, model_pdf)
-    
-    # Detect user emotion
-    user_emotion, confidence, _ = detect_emotion(input_query, st.session_state.history)
-    
-    # Handle uploaded image
     image_data = input_image_setup(uploaded_file)
-    
-    # Generate AI response
     response = get_gemini_response(input_query, context, image_data, st.session_state.history)
     personalized_response = personalize_response(response, user_emotion, confidence)
     
-    # Store conversation history
-    st.session_state.history.append({"question": input_query, "response": personalized_response})
-    
-    # Display AI response
-    #st.write(f"**Context:** {context}")
+    st.session_state.history.append({"question": input_query, "response": personalized_response, "topic": detected_topic})
+    st.write(f"**Topic:** {st.session_state.current_topic}")
     st.write(f"**AI:** {personalized_response}")
 
-# Display Conversation History
 st.subheader("Conversation History")
 for qa in st.session_state.history:
+    st.write(f"**Topic:** {qa.get('topic', 'General')}")
     st.write(f"**You:** {qa['question']}")
     st.write(f"**AI:** {qa['response']}")
     st.write("---")
